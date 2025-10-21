@@ -13,6 +13,10 @@ const userRoutes = require('./routes/users');
 app.use('/auth', authRoutes);
 app.use('/users', userRoutes);
 
+app.get('/', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
 /** 404 handler */
 
 app.use(function(req, res, next) {
