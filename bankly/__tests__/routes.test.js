@@ -3,6 +3,13 @@
 
 process.env.NODE_ENV = "test";
 
+jest.mock('bcrypt', () => {
+  return {
+    hash: jest.fn(async (password, rounds) => `hashed-${password}`),
+    compare: jest.fn(async (password, hashed) => hashed === `hashed-${password}`)
+  };
+});
+
 const app = require("../app");
 const request = require("supertest");
 const db = require("../db");
@@ -13,6 +20,18 @@ const { SECRET_KEY } = require("../config");
 
 // tokens for our sample users
 const tokens = {};
+
+function createForgedAdminToken(username) {
+  const encode = obj =>
+    Buffer.from(JSON.stringify(obj))
+      .toString("base64")
+      .replace(/=/g, "")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_");
+  const header = encode({ alg: "HS256", typ: "JWT" });
+  const payload = encode({ username, admin: true });
+  return `${header}.${payload}.forged-signature`;
+}
 
 /** before each test, insert u1, u2, and u3  [u3 is admin] */
 
@@ -90,6 +109,20 @@ describe("POST /auth/login", function() {
     expect(username).toBe("u1");
     expect(admin).toBe(false);
   });
+
+  test("should reject invalid password", async function() { // TESTS BUG #1
+    const response = await request(app)
+      .post("/auth/login")
+      .send({
+        username: "u1",
+        password: "wrong-password"
+      });
+    expect(response.statusCode).toBe(401);
+    expect(response.body).toEqual({
+      status: 401,
+      message: "Cannot authenticate"
+    });
+  });
 });
 
 describe("GET /users", function() {
@@ -104,6 +137,20 @@ describe("GET /users", function() {
       .send({ _token: tokens.u1 });
     expect(response.statusCode).toBe(200);
     expect(response.body.users.length).toBe(3);
+  });
+
+  test("should limit user fields in listing", async function() { // TESTS BUG #3
+    const response = await request(app)
+      .get("/users")
+      .send({ _token: tokens.u1 });
+    expect(response.statusCode).toBe(200);
+    for (let user of response.body.users) {
+      expect(user).toEqual({
+        username: expect.any(String),
+        first_name: expect.any(String),
+        last_name: expect.any(String)
+      });
+    }
   });
 });
 
@@ -124,6 +171,17 @@ describe("GET /users/[username]", function() {
       last_name: "ln1",
       email: "email1",
       phone: "phone1"
+    });
+  });
+
+  test("should 404 for missing user", async function() { // TESTS BUG #2
+    const response = await request(app)
+      .get("/users/not-real")
+      .send({ _token: tokens.u1 });
+    expect(response.statusCode).toBe(404);
+    expect(response.body).toEqual({
+      status: 404,
+      message: "No such user"
     });
   });
 });
@@ -157,11 +215,31 @@ describe("PATCH /users/[username]", function() {
     });
   });
 
+  test("should allow user to patch themselves", async function() { // TESTS BUG #4
+    const response = await request(app)
+      .patch("/users/u1")
+      .send({ _token: tokens.u1, last_name: "new-ln1" });
+    expect(response.statusCode).toBe(200);
+    expect(response.body.user).toEqual({
+      username: "u1",
+      first_name: "fn1",
+      last_name: "new-ln1",
+      email: "email1",
+      phone: "phone1",
+      admin: false,
+      password: expect.any(String)
+    });
+  });
+
   test("should disallowing patching not-allowed-fields", async function() {
     const response = await request(app)
       .patch("/users/u1")
       .send({ _token: tokens.u1, admin: true });
-    expect(response.statusCode).toBe(401);
+    expect(response.statusCode).toBe(400); // TESTS BUG #5
+    expect(response.body).toEqual({
+      status: 400,
+      message: "Invalid fields in request"
+    });
   });
 
   test("should return 404 if cannot find", async function() {
@@ -182,6 +260,13 @@ describe("DELETE /users/[username]", function() {
     const response = await request(app)
       .delete("/users/u1")
       .send({ _token: tokens.u1 });
+    expect(response.statusCode).toBe(401);
+  });
+
+  test("should reject forged admin tokens", async function() { // TESTS BUG #6
+    const response = await request(app)
+      .delete("/users/u2")
+      .send({ _token: createForgedAdminToken("u2") });
     expect(response.statusCode).toBe(401);
   });
 
